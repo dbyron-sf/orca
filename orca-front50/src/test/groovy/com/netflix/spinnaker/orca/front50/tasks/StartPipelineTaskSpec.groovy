@@ -16,7 +16,7 @@
 
 package com.netflix.spinnaker.orca.front50.tasks
 
-
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus
 import com.netflix.spinnaker.orca.extensionpoint.pipeline.ExecutionPreprocessor
 import com.netflix.spinnaker.orca.front50.DependentPipelineStarter
 import com.netflix.spinnaker.orca.front50.Front50Service
@@ -38,7 +38,10 @@ class StartPipelineTaskSpec extends Specification {
   List<ExecutionPreprocessor> executionPreprocessors
 
   @Subject
-  StartPipelineTask task = new StartPipelineTask(Optional.of(front50Service), dependentPipelineStarter, contextParameterProcessor, Optional.ofNullable(executionPreprocessors))
+  StartPipelineTask task = new StartPipelineTask(Optional.of(front50Service),
+      dependentPipelineStarter,
+      contextParameterProcessor,
+      Optional.ofNullable(executionPreprocessors))
 
   @Unroll
   def "should trigger the dependent pipeline with the correct context and parentPipelineStageId"() {
@@ -111,5 +114,32 @@ class StartPipelineTaskSpec extends Specification {
       "account1"
     )              || "authenticated_user"       || ["account1"]
 
+  }
+
+  def "should fail if dependent pipeline not found"() {
+    given:
+    def pipelineConfig = [id: "testPipelineId", application: "app", name: "testPipeline"]
+    1 * front50Service.getPipeline("testPipelineId") >> pipelineConfig
+    def stage = stage {
+      type = "whatever"
+      context = [
+          pipeline: "testPipelineId",
+          user    : "testUser"
+      ]
+    }
+
+    when:
+    def result = task.execute(stage)
+
+    then:
+    result.status == ExecutionStatus.SUCCEEDED
+
+    when:
+    stage.context.pipeline = "invalidPipelineId"
+    task.execute(stage)
+
+    then:
+    def error = thrown(IllegalArgumentException)
+    error.getMessage() == "The referenced pipeline cannot be located (invalidPipelineId)"
   }
 }

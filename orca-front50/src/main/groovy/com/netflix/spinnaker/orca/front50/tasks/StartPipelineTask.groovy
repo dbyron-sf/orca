@@ -33,8 +33,11 @@ import com.netflix.spinnaker.security.User
 import groovy.util.logging.Slf4j
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
+import retrofit.RetrofitError
 
 import javax.annotation.Nonnull
+
+import static java.net.HttpURLConnection.HTTP_NOT_FOUND
 
 @Component
 @Slf4j
@@ -60,18 +63,24 @@ class StartPipelineTask implements Task {
   @Override
   TaskResult execute(@Nonnull StageExecution stage) {
     if (!front50Service) {
-      throw new UnsupportedOperationException("Cannot start a stored pipeline, front50 is not enabled. Fix this by setting front50.enabled: true")
+      throw new UnsupportedOperationException("Cannot start a stored pipeline, front50 is not enabled. " +
+          "Fix this by setting front50.enabled: true")
     }
 
     String application = stage.context.pipelineApplication ?: stage.context.application
     Boolean isStrategy = stage.context.pipelineParameters?.strategy ?: false
     String pipelineId = isStrategy ? stage.context.pipelineId : stage.context.pipeline
 
-    List<Map<String, Object>> pipelines = isStrategy ? front50Service.getStrategies(application) : front50Service.getPipelines(application, false)
-    Map<String, Object> pipelineConfig = pipelines.find { it.id == pipelineId }
+    Map<String, Object> pipelineConfig
+    if (isStrategy) {
+      pipelineConfig = front50Service.getStrategies(application).find { it.id == pipelineId }
+    } else {
+      pipelineConfig = getPipelineById(pipelineId)
+    }
 
     if (!pipelineConfig) {
-      throw new ConfigurationException("The referenced ${isStrategy ? 'custom strategy' : 'pipeline'} cannot be located (${pipelineId})")
+      throw new IllegalArgumentException("The referenced ${isStrategy ? 'custom strategy' : 'pipeline'} " +
+          "cannot be located (${pipelineId})")
     }
 
     if (pipelineConfig.getOrDefault("disabled", false)) {
@@ -110,14 +119,16 @@ class StartPipelineTask implements Task {
 
     def pipeline = dependentPipelineStarter.trigger(
       pipelineConfig,
-      stage.context.user,
+      stage.context.user as String,
       stage.execution,
-      parameters,
+      parameters as Map,
       stage.id,
       getUser(stage.execution)
     )
 
-    TaskResult.builder(ExecutionStatus.SUCCEEDED).context([executionId: pipeline.id, executionName: pipelineConfig.name]).build()
+    TaskResult.builder(ExecutionStatus.SUCCEEDED)
+      .context([executionId: pipeline.id, executionName: pipelineConfig.name])
+      .build()
   }
 
   // There are currently two sources-of-truth for the user:
@@ -130,7 +141,8 @@ class StartPipelineTask implements Task {
     def korkUsername = AuthenticatedRequest.getSpinnakerUser()
     if (korkUsername.isPresent()) {
       def korkAccounts = AuthenticatedRequest.getSpinnakerAccounts().orElse("")
-      return new User(email: korkUsername.get(), allowedAccounts: korkAccounts?.split(",")?.toList() ?: []).asImmutable()
+      return new User(email: korkUsername.get(), allowedAccounts: korkAccounts?.split(",")?.toList() ?: [])
+        .asImmutable()
     }
 
     if (parentPipeline.authentication?.user) {
@@ -138,5 +150,24 @@ class StartPipelineTask implements Task {
     }
 
     return null
+  }
+
+  /**
+   * Fetches a pipeline from front50 if it exists.
+   * Returns a null if the pipeline doesn't exist in front50
+   * @param id id of the pipeline to be fetched from front50
+   * @return fetched pipeline if it exists, null otherwise
+   */
+  private Map<String, Object> getPipelineById(String id) {
+    try {
+      return front50Service.getPipeline(id);
+    } catch (RetrofitError e) {
+      // Return a null if pipeline with the id not found
+      if (e.getResponse() != null && e.getResponse().getStatus() == HTTP_NOT_FOUND) {
+        log.debug("Existing pipeline with id {} not found. Returning null.", id)
+        return null
+      }
+      throw e
+    }
   }
 }
